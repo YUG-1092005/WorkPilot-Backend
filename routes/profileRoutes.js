@@ -1,0 +1,14 @@
+const express = require('express');
+const { changePassword, getProfile, updateProfile, getLogo, getSignature, removeLogo, removeSignature } = require('../controllers/profileController');
+const { protectProfile } = require('../middleware/profileAuthMiddleware');
+const { uploadBusinessMedia } = require('../middleware/profileUpload');
+const router = express.Router();
+router.use(protectProfile);
+router.get('/', getProfile);
+router.patch('/change-password', changePassword);
+router.patch('/', (req, res, next) => uploadBusinessMedia(req, res, (error) => error ? res.status(400).json({ message: error.message }) : next()), updateProfile);
+router.get('/logo', getLogo);
+router.delete('/logo', removeLogo);
+router.get('/signature', getSignature);
+router.delete('/signature', removeSignature);
+module.exports = router;
