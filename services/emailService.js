@@ -1,5 +1,8 @@
 const nodemailer = require('nodemailer');
-const dns = require('node:dns').promises;
+const dns = require('node:dns');
+
+// Prefer IPv4 without manually replacing the SMTP hostname with an IP.
+dns.setDefaultResultOrder('ipv4first');
 
 const requiredEmailVariables = [
   'SMTP_HOST',
@@ -9,56 +12,69 @@ const requiredEmailVariables = [
 ];
 
 const emailIsConfigured = () => {
-  return requiredEmailVariables.every((key) => process.env[key]);
+  return requiredEmailVariables.every((key) => process.env[key]?.trim());
 };
 
-const createTransporter = async () => {
+let transporter;
+
+const createTransporter = () => {
   if (!emailIsConfigured()) {
     throw new Error('Email service is not configured');
   }
 
-  const smtpHost = process.env.SMTP_HOST.trim();
-  const smtpPort = Number(process.env.SMTP_PORT);
-  const ipv4Addresses = await dns.resolve4(smtpHost);
-
-  if (ipv4Addresses.length === 0) {
-    throw new Error(`No IPv4 address found for ${smtpHost}`);
+  if (transporter) {
+    return transporter;
   }
 
-  return nodemailer.createTransport({
-    host: ipv4Addresses[0],
+  const smtpPort = Number(process.env.SMTP_PORT);
+
+  transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST.trim(),
     port: smtpPort,
-    secure: process.env.SMTP_SECURE === 'true',
+    secure: smtpPort === 465,
+
     requireTLS: smtpPort === 587,
 
-    tls: {
-      servername: smtpHost,
-      minVersion: 'TLSv1.2',
+    auth: {
+      user: process.env.SMTP_USER.trim(),
+      pass: process.env.SMTP_PASS.trim(),
     },
 
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
+    tls: {
+      minVersion: 'TLSv1.2',
     },
 
     connectionTimeout: 20000,
     greetingTimeout: 15000,
     socketTimeout: 30000,
   });
+
+  return transporter;
 };
 
 const sendMail = async ({ to, subject, html, text }) => {
-  const transporter = await createTransporter();
+  try {
+    const mailTransporter = createTransporter();
 
-  return transporter.sendMail({
-    from:
-      process.env.EMAIL_FROM ||
-      `WorkPilot <${process.env.SMTP_USER}>`,
-    to,
-    subject,
-    text,
-    html,
-  });
+    return await mailTransporter.sendMail({
+      from:
+        process.env.EMAIL_FROM ||
+        `WorkPilot <${process.env.SMTP_USER}>`,
+      to,
+      subject,
+      text,
+      html,
+    });
+  } catch (error) {
+    console.error('Email sending failed:', {
+      code: error.code,
+      command: error.command,
+      message: error.message,
+      response: error.response,
+    });
+
+    throw error;
+  }
 };
 
 const sendWelcomeEmail = async ({ to, ownerName, businessName }) => {
