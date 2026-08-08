@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const dns = require('node:dns').promises;
 
 const requiredEmailVariables = [
   'SMTP_HOST',
@@ -11,30 +12,48 @@ const emailIsConfigured = () => {
   return requiredEmailVariables.every((key) => process.env[key]);
 };
 
-const createTransporter = () => {
+const createTransporter = async () => {
   if (!emailIsConfigured()) {
     throw new Error('Email service is not configured');
   }
 
+  const smtpHost = process.env.SMTP_HOST.trim();
+  const smtpPort = Number(process.env.SMTP_PORT);
+  const ipv4Addresses = await dns.resolve4(smtpHost);
+
+  if (ipv4Addresses.length === 0) {
+    throw new Error(`No IPv4 address found for ${smtpHost}`);
+  }
+
   return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT),
+    host: ipv4Addresses[0],
+    port: smtpPort,
     secure: process.env.SMTP_SECURE === 'true',
+    requireTLS: smtpPort === 587,
+
+    tls: {
+      servername: smtpHost,
+      minVersion: 'TLSv1.2',
+    },
+
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 15000,
+
+    connectionTimeout: 20000,
+    greetingTimeout: 15000,
+    socketTimeout: 30000,
   });
 };
 
 const sendMail = async ({ to, subject, html, text }) => {
-  const transporter = createTransporter();
+  const transporter = await createTransporter();
 
   return transporter.sendMail({
-    from: process.env.EMAIL_FROM || `WorkPilot <${process.env.SMTP_USER}>`,
+    from:
+      process.env.EMAIL_FROM ||
+      `WorkPilot <${process.env.SMTP_USER}>`,
     to,
     subject,
     text,
