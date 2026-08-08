@@ -83,11 +83,6 @@ const sendWelcomeEmail = async ({
   ownerName,
   businessName,
 }) => {
-  const logoPath = path.resolve(
-    __dirname,
-    '../../assets/icons/workpilot_logo.png',
-  );
-
   return sendMail({
     to,
     subject: `Welcome to WorkPilot, ${ownerName}!`,
@@ -99,104 +94,63 @@ Welcome to WorkPilot!
 
 Your ${businessName} workspace has been created successfully.
 
-You can now manage customers, inventory, invoices, expenses, tasks and business reports from one convenient workspace.
+You can now manage your business activities from one simple workspace.
 
-We're excited to have you with us!
-
-— The WorkPilot Team
+Best regards,
+The WorkPilot Team
     `.trim(),
-
-    attachments: [
-      {
-        filename: 'workpilot_logo.png',
-        path: logoPath,
-        cid: 'workpilot-logo',
-      },
-    ],
 
     html: `
       <!DOCTYPE html>
       <html>
-        <body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif;color:#111827;">
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-                 style="background:#f1f5f9;padding:32px 12px;">
+        <body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif;">
+          <table width="100%" cellspacing="0" cellpadding="0"
+                 style="background:#f1f5f9;padding:30px 12px;">
             <tr>
               <td align="center">
-                <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-                       style="max-width:600px;background:#ffffff;border-radius:18px;overflow:hidden;
-                              box-shadow:0 8px 30px rgba(15,23,42,0.08);">
+                <table width="100%" cellspacing="0" cellpadding="0"
+                       style="max-width:600px;background:#ffffff;border-radius:18px;overflow:hidden;">
 
                   <tr>
                     <td align="center"
-                        style="background:linear-gradient(135deg,#1d4ed8,#2563eb,#3b82f6);
-                               padding:32px 24px;color:#ffffff;">
-                      <img
-                        src="cid:workpilot-logo"
-                        alt="WorkPilot"
-                        width="76"
-                        style="display:block;width:76px;height:76px;object-fit:contain;
-                               margin-bottom:16px;"
-                      />
-
-                      <h1 style="margin:0;font-size:28px;line-height:1.3;">
+                        style="background:#2563eb;padding:34px 24px;color:#ffffff;">
+                      <h1 style="margin:0;font-size:28px;">
                         Welcome to WorkPilot!
                       </h1>
-
-                      <p style="margin:10px 0 0;font-size:15px;color:#dbeafe;">
-                        Run your business smarter from one simple workspace
+                      <p style="margin:10px 0 0;color:#dbeafe;">
+                        Run your entire business from one app
                       </p>
                     </td>
                   </tr>
 
                   <tr>
-                    <td style="padding:34px 32px;">
-                      <h2 style="margin:0 0 14px;font-size:22px;color:#0f172a;">
+                    <td style="padding:34px 30px;">
+                      <h2 style="margin:0 0 15px;color:#0f172a;">
                         Hi ${ownerName},
                       </h2>
 
-                      <p style="margin:0 0 18px;font-size:16px;line-height:1.7;color:#475569;">
+                      <p style="font-size:16px;line-height:1.7;color:#475569;">
                         Great news! Your
                         <strong style="color:#2563eb;">${businessName}</strong>
                         workspace has been created successfully.
                       </p>
 
-                      <p style="margin:0 0 22px;font-size:16px;line-height:1.7;color:#475569;">
-                        WorkPilot gives you one convenient place to organize your
-                        daily business activities and stay in control.
-                      </p>
+                      <div style="background:#eff6ff;padding:20px;border-radius:12px;margin:22px 0;">
+                        <p style="margin:0 0 10px;font-weight:bold;color:#1e3a8a;">
+                          You can now manage:
+                        </p>
+                        <p style="margin:7px 0;color:#334155;">✓ Customers and contacts</p>
+                        <p style="margin:7px 0;color:#334155;">✓ Inventory and stock</p>
+                        <p style="margin:7px 0;color:#334155;">✓ Invoices and payments</p>
+                        <p style="margin:7px 0;color:#334155;">✓ Expenses and tasks</p>
+                        <p style="margin:7px 0;color:#334155;">✓ Business insights</p>
+                      </div>
 
-                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-                             style="background:#eff6ff;border-radius:14px;margin-bottom:24px;">
-                        <tr>
-                          <td style="padding:22px;">
-                            <p style="margin:0 0 12px;font-size:15px;font-weight:bold;color:#1e3a8a;">
-                              Here’s what you can manage:
-                            </p>
-
-                            <p style="margin:7px 0;font-size:14px;color:#334155;">
-                              ✓ Customers and business contacts
-                            </p>
-                            <p style="margin:7px 0;font-size:14px;color:#334155;">
-                              ✓ Inventory and stock
-                            </p>
-                            <p style="margin:7px 0;font-size:14px;color:#334155;">
-                              ✓ Invoices, sales and payments
-                            </p>
-                            <p style="margin:7px 0;font-size:14px;color:#334155;">
-                              ✓ Expenses, tasks and reminders
-                            </p>
-                            <p style="margin:7px 0;font-size:14px;color:#334155;">
-                              ✓ Business reports and insights
-                            </p>
-                          </td>
-                        </tr>
-                      </table>
-
-                      <p style="margin:0;font-size:16px;line-height:1.7;color:#475569;">
+                      <p style="font-size:15px;line-height:1.7;color:#475569;">
                         We’re excited to be part of your business journey.
                       </p>
 
-                      <p style="margin:24px 0 0;font-size:15px;color:#0f172a;">
+                      <p style="margin-top:24px;color:#0f172a;">
                         Best regards,<br>
                         <strong>The WorkPilot Team</strong>
                       </p>
@@ -205,11 +159,9 @@ We're excited to have you with us!
 
                   <tr>
                     <td align="center"
-                        style="background:#f8fafc;border-top:1px solid #e2e8f0;
-                               padding:20px 24px;">
-                      <p style="margin:0;font-size:12px;line-height:1.6;color:#94a3b8;">
-                        This email was sent because a WorkPilot account was created
-                        using this email address.
+                        style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:18px;">
+                      <p style="margin:0;font-size:12px;color:#94a3b8;">
+                        This email was sent because a WorkPilot account was created using this address.
                       </p>
                     </td>
                   </tr>
@@ -223,6 +175,7 @@ We're excited to have you with us!
     `,
   });
 };
+
 
 const sendPasswordResetOtp = async ({ to, ownerName, otp }) => {
   return sendMail({
