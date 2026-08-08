@@ -1,5 +1,7 @@
 const nodemailer = require('nodemailer');
 const dns = require('node:dns');
+const { google } = require('googleapis');
+
 
 // Prefer IPv4 without manually replacing the SMTP hostname with an IP.
 dns.setDefaultResultOrder('ipv4first');
@@ -52,30 +54,81 @@ const createTransporter = () => {
   return transporter;
 };
 
-const sendMail = async ({ to, subject, html, text }) => {
-  const response = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: 'WorkPilot <onboarding@resend.dev>',
-      to: [to],
-      subject,
-      html,
-      text,
-    }),
-  });
 
-  const result = await response.json();
+const emailIsConfigured = () =>
+  Boolean(
+    process.env.GMAIL_CLIENT_ID &&
+    process.env.GMAIL_CLIENT_SECRET &&
+    process.env.GMAIL_REFRESH_TOKEN &&
+    process.env.GMAIL_SENDER_EMAIL
+  );
 
-  if (!response.ok) {
-    throw new Error(result.message || 'Unable to send email');
+const getGmailClient = () => {
+  if (!emailIsConfigured()) {
+    throw new Error('Gmail API environment variables are missing');
   }
 
-  console.log('Email sent successfully:', result.id);
-  return result;
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GMAIL_CLIENT_ID.trim(),
+    process.env.GMAIL_CLIENT_SECRET.trim()
+  );
+
+  oauth2Client.setCredentials({
+    refresh_token: process.env.GMAIL_REFRESH_TOKEN.trim(),
+  });
+
+  return google.gmail({
+    version: 'v1',
+    auth: oauth2Client,
+  });
+};
+
+const encodeBase64Url = (value) =>
+  Buffer.from(value)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+const sendMail = async ({ to, subject, text, html }) => {
+  const sender = process.env.GMAIL_SENDER_EMAIL.trim();
+  const boundary = `workpilot_${Date.now()}`;
+
+  const message = [
+    `From: WorkPilot <${sender}>`,
+    `To: ${to}`,
+    `Subject: =?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    '',
+    text,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    '',
+    html,
+    '',
+    `--${boundary}--`,
+  ].join('\r\n');
+
+  const gmail = getGmailClient();
+
+  const response = await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: {
+      raw: encodeBase64Url(message),
+    },
+  });
+
+  console.log('Gmail sent successfully:', {
+    messageId: response.data.id,
+    recipient: to,
+  });
+
+  return response.data;
 };
 
 const sendWelcomeEmail = async ({
@@ -195,6 +248,6 @@ const sendPasswordResetOtp = async ({ to, ownerName, otp }) => {
 
 module.exports = {
   emailIsConfigured,
-  sendPasswordResetOtp,
   sendWelcomeEmail,
+  sendPasswordResetOtp,
 };
