@@ -53,47 +53,190 @@ const createTransporter = () => {
 };
 
 const sendMail = async ({ to, subject, html, text }) => {
-  try {
-    const mailTransporter = createTransporter();
-
-    return await mailTransporter.sendMail({
-      from:
-        process.env.EMAIL_FROM ||
-        `WorkPilot <${process.env.SMTP_USER}>`,
-      to,
-      subject,
-      text,
-      html,
-    });
-  } catch (error) {
-    console.error('Email sending failed:', {
-      code: error.code,
-      command: error.command,
-      message: error.message,
-      response: error.response,
-    });
-
-    throw error;
+  if (!process.env.BREVO_API_KEY) {
+    throw new Error('BREVO_API_KEY is not configured');
   }
+
+  if (!process.env.BREVO_SENDER_EMAIL) {
+    throw new Error('BREVO_SENDER_EMAIL is not configured');
+  }
+
+  const response = await fetch(
+    'https://api.brevo.com/v3/smtp/email',
+    {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'api-key': process.env.BREVO_API_KEY,
+      },
+      body: JSON.stringify({
+        sender: {
+          name: 'WorkPilot',
+          email: process.env.BREVO_SENDER_EMAIL,
+        },
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+        textContent: text,
+      }),
+    },
+  );
+
+  const result = await response.json();
+
+  if (!response.ok) {
+    throw new Error(
+      result.message || `Brevo email failed: ${response.status}`,
+    );
+  }
+
+  console.log('Email sent successfully:', result.messageId);
+  return result;
 };
 
-const sendWelcomeEmail = async ({ to, ownerName, businessName }) => {
+const sendWelcomeEmail = async ({
+  to,
+  ownerName,
+  businessName,
+}) => {
+  const logoPath = path.resolve(
+    __dirname,
+    '../../assets/icons/workpilot_logo.png',
+  );
+
   return sendMail({
     to,
-    subject: 'Welcome to WorkPilot',
-    text: `Welcome to WorkPilot, ${ownerName}! Your ${businessName} workspace is ready.`,
+    subject: `Welcome to WorkPilot, ${ownerName}!`,
+
+    text: `
+Hi ${ownerName},
+
+Welcome to WorkPilot!
+
+Your ${businessName} workspace has been created successfully.
+
+You can now manage customers, inventory, invoices, expenses, tasks and business reports from one convenient workspace.
+
+We're excited to have you with us!
+
+— The WorkPilot Team
+    `.trim(),
+
+    attachments: [
+      {
+        filename: 'workpilot_logo.png',
+        path: logoPath,
+        cid: 'workpilot-logo',
+      },
+    ],
+
     html: `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;color:#111827">
-        <div style="background:#2563eb;padding:24px;border-radius:14px 14px 0 0;color:white">
-          <h1 style="margin:0;font-size:25px">Welcome to WorkPilot</h1>
-        </div>
-        <div style="padding:28px;border:1px solid #e5e7eb;border-top:0;border-radius:0 0 14px 14px">
-          <h2 style="margin-top:0">Hi ${ownerName},</h2>
-          <p>Your <strong>${businessName}</strong> workspace has been created successfully.</p>
-          <p>You can now manage your business from one simple workspace.</p>
-          <p style="margin-bottom:0">— The WorkPilot Team</p>
-        </div>
-      </div>
+      <!DOCTYPE html>
+      <html>
+        <body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,sans-serif;color:#111827;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                 style="background:#f1f5f9;padding:32px 12px;">
+            <tr>
+              <td align="center">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                       style="max-width:600px;background:#ffffff;border-radius:18px;overflow:hidden;
+                              box-shadow:0 8px 30px rgba(15,23,42,0.08);">
+
+                  <tr>
+                    <td align="center"
+                        style="background:linear-gradient(135deg,#1d4ed8,#2563eb,#3b82f6);
+                               padding:32px 24px;color:#ffffff;">
+                      <img
+                        src="cid:workpilot-logo"
+                        alt="WorkPilot"
+                        width="76"
+                        style="display:block;width:76px;height:76px;object-fit:contain;
+                               margin-bottom:16px;"
+                      />
+
+                      <h1 style="margin:0;font-size:28px;line-height:1.3;">
+                        Welcome to WorkPilot!
+                      </h1>
+
+                      <p style="margin:10px 0 0;font-size:15px;color:#dbeafe;">
+                        Run your business smarter from one simple workspace
+                      </p>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding:34px 32px;">
+                      <h2 style="margin:0 0 14px;font-size:22px;color:#0f172a;">
+                        Hi ${ownerName},
+                      </h2>
+
+                      <p style="margin:0 0 18px;font-size:16px;line-height:1.7;color:#475569;">
+                        Great news! Your
+                        <strong style="color:#2563eb;">${businessName}</strong>
+                        workspace has been created successfully.
+                      </p>
+
+                      <p style="margin:0 0 22px;font-size:16px;line-height:1.7;color:#475569;">
+                        WorkPilot gives you one convenient place to organize your
+                        daily business activities and stay in control.
+                      </p>
+
+                      <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+                             style="background:#eff6ff;border-radius:14px;margin-bottom:24px;">
+                        <tr>
+                          <td style="padding:22px;">
+                            <p style="margin:0 0 12px;font-size:15px;font-weight:bold;color:#1e3a8a;">
+                              Here’s what you can manage:
+                            </p>
+
+                            <p style="margin:7px 0;font-size:14px;color:#334155;">
+                              ✓ Customers and business contacts
+                            </p>
+                            <p style="margin:7px 0;font-size:14px;color:#334155;">
+                              ✓ Inventory and stock
+                            </p>
+                            <p style="margin:7px 0;font-size:14px;color:#334155;">
+                              ✓ Invoices, sales and payments
+                            </p>
+                            <p style="margin:7px 0;font-size:14px;color:#334155;">
+                              ✓ Expenses, tasks and reminders
+                            </p>
+                            <p style="margin:7px 0;font-size:14px;color:#334155;">
+                              ✓ Business reports and insights
+                            </p>
+                          </td>
+                        </tr>
+                      </table>
+
+                      <p style="margin:0;font-size:16px;line-height:1.7;color:#475569;">
+                        We’re excited to be part of your business journey.
+                      </p>
+
+                      <p style="margin:24px 0 0;font-size:15px;color:#0f172a;">
+                        Best regards,<br>
+                        <strong>The WorkPilot Team</strong>
+                      </p>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td align="center"
+                        style="background:#f8fafc;border-top:1px solid #e2e8f0;
+                               padding:20px 24px;">
+                      <p style="margin:0;font-size:12px;line-height:1.6;color:#94a3b8;">
+                        This email was sent because a WorkPilot account was created
+                        using this email address.
+                      </p>
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+          </table>
+        </body>
+      </html>
     `,
   });
 };
