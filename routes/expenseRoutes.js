@@ -4,6 +4,7 @@ const {
   getExpenseSummary,
   createExpense,
   updateExpense,
+  markExpensePaid,
   deleteExpense,
   getReceipt,
   deleteReceipt,
@@ -24,9 +25,10 @@ const uploadOne = (req, res, next) => {
 router.get('/summary', getExpenseSummary);
 router.get('/', listExpenses);
 router.post('/', uploadOne, createExpense);
+router.patch('/:id', uploadOne, updateExpense);
+router.patch('/:id/mark-paid', markExpensePaid);
 router.get('/:id/receipt', getReceipt);
 router.delete('/:id/receipt', deleteReceipt);
-router.patch('/:id', uploadOne, updateExpense);
 router.delete('/:id', deleteExpense);
 
 module.exports = router;

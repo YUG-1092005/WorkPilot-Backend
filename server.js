@@ -16,10 +16,12 @@ const profileRoutes = require('./routes/profileRoutes');
 const activityRoutes = require('./routes/activityRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const { handleWebhook } = require('./controllers/paymentController');
+const { startNotificationSweeps } = require('./services/notificationSweepService');
 
 const app = express();
 
 connectDatabase();
+startNotificationSweeps();
 
 app.use(helmet());
 app.use(cors());
@@ -44,7 +46,6 @@ app.use('/api/expenses', expenseRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/activities', activityRoutes);
-// Public callback from Razorpay. Its signature is verified using the untouched request body.
 app.post('/api/payments/webhook', handleWebhook);
 app.use('/api/payments', paymentRoutes);
 

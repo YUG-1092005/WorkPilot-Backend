@@ -6,29 +6,23 @@ const {
   deleteReceiptFromCloudinary,
   createTemporaryReceiptUrl,
 } = require('../services/cloudinaryReceiptService');
-const { recordActivity } = require('../services/activityService');
 
 const categories = ['Rent', 'Salary', 'Utilities', 'Transport', 'Marketing', 'Supplies', 'Maintenance', 'Tax', 'Other'];
 const paymentMethods = ['Cash', 'UPI', 'Card', 'Bank Transfer', 'Cheque', 'Other'];
 const frequencies = ['None', 'Weekly', 'Monthly', 'Quarterly', 'Yearly'];
-const roundMoney = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
-const cleanText = (value) => `${value ?? ''}`.trim();
-const asNumber = (value) => {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : NaN;
-};
+const clean = (value) => `${value ?? ''}`.trim();
 const asBoolean = (value) => value === true || value === 'true';
-const getBusiness = (ownerId) => Business.findOne({ ownerId }).select('_id ownerId');
-
+const money = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 const safeDate = (value, fallback = null) => {
   if (!value) return fallback;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+  const result = new Date(value);
+  return Number.isNaN(result.getTime()) ? fallback : result;
 };
+const getBusiness = (ownerId) => Business.findOne({ ownerId }).select('_id ownerId');
 
-const calculateNextDueDate = (expenseDate, frequency) => {
+const nextRecurringDate = (date, frequency) => {
   if (frequency === 'None') return null;
-  const next = new Date(expenseDate);
+  const next = new Date(date);
   if (frequency === 'Weekly') next.setDate(next.getDate() + 7);
   if (frequency === 'Monthly') next.setMonth(next.getMonth() + 1);
   if (frequency === 'Quarterly') next.setMonth(next.getMonth() + 3);
@@ -36,21 +30,11 @@ const calculateNextDueDate = (expenseDate, frequency) => {
   return next;
 };
 
-const cloudReceipt = (expense) => ({
+const receiptAsset = (expense) => ({
   publicId: expense?.receiptPublicId,
   resourceType: expense?.receiptResourceType,
   deliveryType: expense?.receiptDeliveryType,
 });
-
-const removeCloudReceipt = async (receipt, { throwOnFailure = false } = {}) => {
-  if (!receipt?.publicId) return;
-  try {
-    await deleteReceiptFromCloudinary(receipt);
-  } catch (error) {
-    console.error('Cloudinary receipt cleanup error:', error);
-    if (throwOnFailure) throw error;
-  }
-};
 
 const receiptFields = (file, uploaded) => ({
   receiptOriginalName: file.originalname,
@@ -62,7 +46,7 @@ const receiptFields = (file, uploaded) => ({
   receiptSize: uploaded.bytes || file.size,
 });
 
-const clearReceiptFields = (expense) => {
+const clearReceipt = (expense) => {
   expense.receiptOriginalName = '';
   expense.receiptPublicId = '';
   expense.receiptFormat = '';
@@ -72,38 +56,87 @@ const clearReceiptFields = (expense) => {
   expense.receiptSize = 0;
 };
 
-const isCloudinaryError = (error) =>
-  error?.code === 'CLOUDINARY_NOT_CONFIGURED' || Number.isFinite(error?.http_code);
+const removeReceiptAsset = async (asset) => {
+  if (!asset?.publicId) return;
+  try {
+    await deleteReceiptFromCloudinary(asset);
+  } catch (error) {
+    console.error('Receipt cleanup error:', error);
+  }
+};
 
 const serialize = (expense) => {
   const object = expense.toObject ? expense.toObject() : expense;
-  const {
-    receiptPublicId,
-    receiptFormat,
-    receiptResourceType,
-    receiptDeliveryType,
-    ...safeExpense
-  } = object;
-  return { ...safeExpense, hasReceipt: Boolean(receiptPublicId) };
+  const { receiptPublicId, receiptFormat, receiptResourceType, receiptDeliveryType, ...safe } = object;
+  return {
+    ...safe,
+    paymentStatus: safe.paymentStatus || 'Paid', // compatible with older records
+    hasReceipt: Boolean(receiptPublicId),
+  };
+};
+
+const parsePayload = (req, existing = null) => {
+  const amount = Number(req.body.amount);
+  const expenseDate = safeDate(req.body.expenseDate, existing?.expenseDate || new Date());
+  const paymentStatus = req.body.paymentStatus === 'Unpaid' ? 'Unpaid' : 'Paid';
+  const requestedMethod = paymentMethods.includes(req.body.paymentMethod) ? req.body.paymentMethod : 'Cash';
+  const isRecurring = asBoolean(req.body.isRecurring);
+  const recurrenceFrequency = isRecurring && frequencies.includes(req.body.recurrenceFrequency)
+    ? req.body.recurrenceFrequency
+    : 'None';
+  const recurrenceEndDate = isRecurring ? safeDate(req.body.recurrenceEndDate) : null;
+  const nextDueDate = isRecurring ? nextRecurringDate(expenseDate, recurrenceFrequency) : null;
+
+  return {
+    title: clean(req.body.title),
+    category: categories.includes(req.body.category) ? req.body.category : 'Other',
+    amount,
+    expenseDate,
+    paymentStatus,
+    paymentMethod: paymentStatus === 'Paid' ? requestedMethod : 'Not selected',
+    dueDate: paymentStatus === 'Unpaid' ? safeDate(req.body.dueDate) : null,
+    paidAt: paymentStatus === 'Paid'
+      ? safeDate(req.body.paidAt, existing?.paidAt || expenseDate || new Date())
+      : null,
+    transactionReference: paymentStatus === 'Paid' ? clean(req.body.transactionReference) : '',
+    vendor: clean(req.body.vendor),
+    vendorUpiId: clean(req.body.vendorUpiId),
+    referenceNumber: clean(req.body.referenceNumber),
+    description: clean(req.body.description),
+    isRecurring: isRecurring && recurrenceFrequency !== 'None',
+    recurrenceFrequency,
+    nextDueDate: recurrenceEndDate && nextDueDate && nextDueDate > recurrenceEndDate ? null : nextDueDate,
+    recurrenceEndDate,
+  };
+};
+
+const validate = (payload) => {
+  if (!payload.title) return 'Expense title is required';
+  if (!Number.isFinite(payload.amount) || payload.amount <= 0) return 'Amount must be greater than zero';
+  if (!payload.expenseDate) return 'Enter a valid expense date';
+  if (payload.paymentStatus === 'Unpaid' && !payload.dueDate) return 'Due date is required for an unpaid expense';
+  if (payload.recurrenceEndDate && payload.recurrenceEndDate <= payload.expenseDate) {
+    return 'Recurring end date must be after the expense date';
+  }
+  return null;
 };
 
 const buildFilter = (businessId, query) => {
   const filter = { businessId };
-  const search = cleanText(query.search);
-  if (search) {
-    const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const expression = new RegExp(escaped, 'i');
-    filter.$or = [
-      { title: expression },
-      { vendor: expression },
-      { referenceNumber: expression },
-      { description: expression },
-    ];
-  }
+  const and = [];
   if (categories.includes(query.category)) filter.category = query.category;
   if (paymentMethods.includes(query.paymentMethod)) filter.paymentMethod = query.paymentMethod;
+  if (query.paymentStatus === 'Unpaid') filter.paymentStatus = 'Unpaid';
+  if (query.paymentStatus === 'Paid') {
+    and.push({ $or: [{ paymentStatus: 'Paid' }, { paymentStatus: { $exists: false } }] });
+  }
   if (query.recurring === 'true') filter.isRecurring = true;
   if (query.recurring === 'false') filter.isRecurring = false;
+  const search = clean(query.search);
+  if (search) {
+    const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    and.push({ $or: [{ title: regex }, { vendor: regex }, { referenceNumber: regex }, { transactionReference: regex }] });
+  }
   if (query.from || query.to) {
     filter.expenseDate = {};
     const from = safeDate(query.from);
@@ -113,48 +146,9 @@ const buildFilter = (businessId, query) => {
       to.setHours(23, 59, 59, 999);
       filter.expenseDate.$lte = to;
     }
-    if (Object.keys(filter.expenseDate).length === 0) delete filter.expenseDate;
   }
+  if (and.length) filter.$and = and;
   return filter;
-};
-
-const expensePayload = (req, existing = null) => {
-  const title = cleanText(req.body.title);
-  const amount = asNumber(req.body.amount);
-  const expenseDate = safeDate(req.body.expenseDate, existing?.expenseDate || new Date());
-  const category = categories.includes(req.body.category) ? req.body.category : 'Other';
-  const paymentMethod = paymentMethods.includes(req.body.paymentMethod) ? req.body.paymentMethod : 'Cash';
-  const isRecurring = asBoolean(req.body.isRecurring);
-  const recurrenceFrequency = isRecurring && frequencies.includes(req.body.recurrenceFrequency)
-    ? req.body.recurrenceFrequency
-    : 'None';
-  const recurrenceEndDate = isRecurring ? safeDate(req.body.recurrenceEndDate) : null;
-  const nextDueDate = isRecurring ? calculateNextDueDate(expenseDate, recurrenceFrequency) : null;
-  return {
-    title,
-    amount,
-    expenseDate,
-    category,
-    paymentMethod,
-    vendor: cleanText(req.body.vendor),
-    referenceNumber: cleanText(req.body.referenceNumber),
-    description: cleanText(req.body.description),
-    isRecurring: isRecurring && recurrenceFrequency !== 'None',
-    recurrenceFrequency,
-    nextDueDate: recurrenceEndDate && nextDueDate && nextDueDate > recurrenceEndDate ? null : nextDueDate,
-    recurrenceEndDate,
-  };
-};
-
-const validatePayload = (payload) => {
-  if (!payload.title) return 'Expense title is required';
-  if (payload.title.length > 120) return 'Expense title is too long';
-  if (!Number.isFinite(payload.amount) || payload.amount <= 0) return 'Amount must be greater than zero';
-  if (!payload.expenseDate) return 'Enter a valid expense date';
-  if (payload.recurrenceEndDate && payload.recurrenceEndDate <= payload.expenseDate) {
-    return 'Recurring end date must be after the expense date';
-  }
-  return null;
 };
 
 const listExpenses = async (req, res) => {
@@ -162,7 +156,7 @@ const listExpenses = async (req, res) => {
     const business = await getBusiness(req.userId);
     if (!business) return res.status(404).json({ message: 'Business workspace not found' });
     const expenses = await Expense.find(buildFilter(business._id, req.query))
-      .sort({ expenseDate: -1, createdAt: -1 })
+      .sort({ paymentStatus: -1, dueDate: 1, expenseDate: -1 })
       .limit(500)
       .lean();
     return res.json({ expenses: expenses.map(serialize) });
@@ -178,73 +172,42 @@ const getExpenseSummary = async (req, res) => {
     if (!business) return res.status(404).json({ message: 'Business workspace not found' });
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-
-    const [totals, byCategory, upcoming] = await Promise.all([
+    const [totals, categoriesThisMonth] = await Promise.all([
       Expense.aggregate([
         { $match: { businessId: business._id } },
-        {
-          $group: {
-            _id: null,
-            totalExpenses: { $sum: '$amount' },
-            expenseCount: { $sum: 1 },
-            recurringCount: { $sum: { $cond: ['$isRecurring', 1, 0] } },
-            todayExpenses: {
-              $sum: {
-                $cond: [
-                  { $and: [{ $gte: ['$expenseDate', today] }, { $lt: ['$expenseDate', tomorrow] }] },
-                  '$amount',
-                  0,
-                ],
-              },
-            },
-            monthExpenses: {
-              $sum: {
-                $cond: [
-                  { $and: [{ $gte: ['$expenseDate', monthStart] }, { $lt: ['$expenseDate', monthEnd] }] },
-                  '$amount',
-                  0,
-                ],
-              },
-            },
-          },
-        },
+        { $group: {
+          _id: null,
+          totalExpenses: { $sum: '$amount' },
+          expenseCount: { $sum: 1 },
+          paidAmount: { $sum: { $cond: [{ $eq: [{ $ifNull: ['$paymentStatus', 'Paid'] }, 'Paid'] }, '$amount', 0] } },
+          unpaidAmount: { $sum: { $cond: [{ $eq: ['$paymentStatus', 'Unpaid'] }, '$amount', 0] } },
+          unpaidCount: { $sum: { $cond: [{ $eq: ['$paymentStatus', 'Unpaid'] }, 1, 0] } },
+          overdueCount: { $sum: { $cond: [{ $and: [{ $eq: ['$paymentStatus', 'Unpaid'] }, { $lt: ['$dueDate', today] }] }, 1, 0] } },
+          monthExpenses: { $sum: { $cond: [{ $and: [{ $gte: ['$expenseDate', monthStart] }, { $lt: ['$expenseDate', monthEnd] }] }, '$amount', 0] } },
+          recurringCount: { $sum: { $cond: ['$isRecurring', 1, 0] } },
+        } },
       ]),
       Expense.aggregate([
         { $match: { businessId: business._id, expenseDate: { $gte: monthStart, $lt: monthEnd } } },
         { $group: { _id: '$category', amount: { $sum: '$amount' }, count: { $sum: 1 } } },
         { $sort: { amount: -1 } },
       ]),
-      Expense.aggregate([
-        {
-          $match: {
-            businessId: business._id,
-            isRecurring: true,
-            nextDueDate: { $ne: null },
-            $or: [{ recurrenceEndDate: null }, { recurrenceEndDate: { $gte: today } }],
-          },
-        },
-        { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: '$amount' } } },
-      ]),
     ]);
-
-    const top = byCategory[0];
+    const base = totals[0] || {};
     return res.json({
       summary: {
-        ...(totals[0] || { totalExpenses: 0, expenseCount: 0, recurringCount: 0, todayExpenses: 0, monthExpenses: 0 }),
-        upcomingRecurringCount: upcoming[0]?.count || 0,
-        upcomingRecurringAmount: roundMoney(upcoming[0]?.amount || 0),
-        topCategory: top?._id || '',
-        topCategoryAmount: roundMoney(top?.amount || 0),
+        totalExpenses: money(base.totalExpenses),
+        monthExpenses: money(base.monthExpenses),
+        paidAmount: money(base.paidAmount),
+        unpaidAmount: money(base.unpaidAmount),
+        expenseCount: base.expenseCount || 0,
+        unpaidCount: base.unpaidCount || 0,
+        overdueCount: base.overdueCount || 0,
+        recurringCount: base.recurringCount || 0,
       },
-      byCategory: byCategory.map((entry) => ({
-        category: entry._id,
-        amount: roundMoney(entry.amount),
-        count: entry.count,
-      })),
+      byCategory: categoriesThisMonth.map((row) => ({ category: row._id, amount: money(row.amount), count: row.count })),
     });
   } catch (error) {
     console.error('Expense summary error:', error);
@@ -252,148 +215,129 @@ const getExpenseSummary = async (req, res) => {
   }
 };
 
-const createExpense = async (req, res) => {
-  let uploadedReceipt = null;
+const saveExpense = (editing) => async (req, res) => {
+  let uploaded = null;
   try {
     const business = await getBusiness(req.userId);
     if (!business) return res.status(404).json({ message: 'Business workspace not found' });
-    const payload = expensePayload(req);
-    const validation = validatePayload(payload);
-    if (validation) return res.status(400).json({ message: validation });
+    let expense = null;
+    if (editing) {
+      if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid expense ID' });
+      expense = await Expense.findOne({ _id: req.params.id, businessId: business._id, ownerId: req.userId });
+      if (!expense) return res.status(404).json({ message: 'Expense not found' });
+    }
+    const payload = parsePayload(req, expense);
+    const problem = validate(payload);
+    if (problem) return res.status(400).json({ message: problem });
 
+    const oldReceipt = receiptAsset(expense);
     if (req.file) {
-      uploadedReceipt = await uploadReceiptToCloudinary({
+      uploaded = await uploadReceiptToCloudinary({
         buffer: req.file.buffer,
         businessId: business._id.toString(),
         originalName: req.file.originalname,
       });
     }
-
-    const expense = await Expense.create({
-      ...payload,
-      businessId: business._id,
-      ownerId: req.userId,
-      ...(req.file && uploadedReceipt ? receiptFields(req.file, uploadedReceipt) : {}),
+    if (!expense) {
+      expense = new Expense({ ...payload, businessId: business._id, ownerId: req.userId });
+    } else {
+      Object.assign(expense, payload);
+    }
+    if (req.file && uploaded) Object.assign(expense, receiptFields(req.file, uploaded));
+    await expense.save();
+    if (editing && uploaded && oldReceipt.publicId) await removeReceiptAsset(oldReceipt);
+    return res.status(editing ? 200 : 201).json({
+      message: editing ? 'Expense updated successfully' : 'Expense added successfully',
+      expense: serialize(expense),
     });
-    await recordActivity({ businessId: business._id, ownerId: req.userId, type: 'expense_added', category: 'Expenses', title: `${expense.title} expense added`, description: `${expense.category} • ${expense.paymentMethod}`, amount: expense.amount, entityType: 'Expense', entityId: expense._id, route: '/expenses' });
-    return res.status(201).json({ message: 'Expense added successfully', expense: serialize(expense) });
   } catch (error) {
-    if (uploadedReceipt?.public_id) {
-      await removeCloudReceipt({
-        publicId: uploadedReceipt.public_id,
-        resourceType: uploadedReceipt.resource_type,
-        deliveryType: uploadedReceipt.type,
-      });
+    if (uploaded?.public_id) await removeReceiptAsset({ publicId: uploaded.public_id, resourceType: uploaded.resource_type, deliveryType: uploaded.type });
+    console.error('Save expense error:', error);
+    if (error?.code === 'CLOUDINARY_NOT_CONFIGURED' || Number.isFinite(error?.http_code)) {
+      return res.status(503).json({ message: 'Image storage is unavailable. Check the Cloudinary variables on Render.' });
     }
-    console.error('Create expense error:', error);
-    if (isCloudinaryError(error)) {
-      return res.status(503).json({ message: 'Receipt cloud storage is unavailable or not configured' });
-    }
-    return res.status(500).json({ message: 'Unable to add expense' });
+    return res.status(500).json({ message: 'Unable to save expense' });
   }
 };
 
-const updateExpense = async (req, res) => {
-  let uploadedReceipt = null;
+const markExpensePaid = async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid expense ID' });
     const business = await getBusiness(req.userId);
-    if (!business) return res.status(404).json({ message: 'Business workspace not found' });
-    const expense = await Expense.findOne({ _id: req.params.id, businessId: business._id, ownerId: req.userId });
+    const expense = business && await Expense.findOne({ _id: req.params.id, businessId: business._id, ownerId: req.userId });
     if (!expense) return res.status(404).json({ message: 'Expense not found' });
-    const payload = expensePayload(req, expense);
-    const validation = validatePayload(payload);
-    if (validation) return res.status(400).json({ message: validation });
-
-    const oldReceipt = cloudReceipt(expense);
-    if (req.file) {
-      uploadedReceipt = await uploadReceiptToCloudinary({
-        buffer: req.file.buffer,
-        businessId: business._id.toString(),
-        originalName: req.file.originalname,
-      });
-    }
-
-    Object.assign(expense, payload);
-    if (req.file && uploadedReceipt) Object.assign(expense, receiptFields(req.file, uploadedReceipt));
+    const method = paymentMethods.includes(req.body.paymentMethod) ? req.body.paymentMethod : null;
+    if (!method) return res.status(400).json({ message: 'Select how the expense was paid' });
+    expense.paymentStatus = 'Paid';
+    expense.paymentMethod = method;
+    expense.paidAt = safeDate(req.body.paidAt, new Date());
+    expense.transactionReference = clean(req.body.transactionReference);
     await expense.save();
-    if (req.file && oldReceipt.publicId) await removeCloudReceipt(oldReceipt);
-    await recordActivity({ businessId: business._id, ownerId: req.userId, type: 'expense_updated', category: 'Expenses', title: `${expense.title} expense updated`, description: expense.category, amount: expense.amount, entityType: 'Expense', entityId: expense._id, route: '/expenses' });
-    return res.json({ message: 'Expense updated successfully', expense: serialize(expense) });
+    return res.json({ message: 'Expense marked as paid', expense: serialize(expense) });
   } catch (error) {
-    if (uploadedReceipt?.public_id) {
-      await removeCloudReceipt({
-        publicId: uploadedReceipt.public_id,
-        resourceType: uploadedReceipt.resource_type,
-        deliveryType: uploadedReceipt.type,
-      });
-    }
-    console.error('Update expense error:', error);
-    if (isCloudinaryError(error)) {
-      return res.status(503).json({ message: 'Receipt cloud storage is unavailable or not configured' });
-    }
-    return res.status(500).json({ message: 'Unable to update expense' });
+    console.error('Mark expense paid error:', error);
+    return res.status(500).json({ message: 'Unable to update the expense payment' });
   }
 };
 
 const deleteExpense = async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid expense ID' });
     const business = await getBusiness(req.userId);
-    if (!business) return res.status(404).json({ message: 'Business workspace not found' });
-    const expense = await Expense.findOneAndDelete({ _id: req.params.id, businessId: business._id, ownerId: req.userId });
+    const expense = business && mongoose.isValidObjectId(req.params.id)
+      ? await Expense.findOneAndDelete({ _id: req.params.id, businessId: business._id, ownerId: req.userId })
+      : null;
     if (!expense) return res.status(404).json({ message: 'Expense not found' });
-    await removeCloudReceipt(cloudReceipt(expense));
-    await recordActivity({ businessId: business._id, ownerId: req.userId, type: 'expense_deleted', category: 'Expenses', title: `${expense.title} expense deleted`, description: expense.category, amount: expense.amount, entityType: 'Expense', entityId: expense._id, route: '/expenses' });
+    await removeReceiptAsset(receiptAsset(expense));
     return res.json({ message: 'Expense deleted successfully' });
   } catch (error) {
-    console.error('Delete expense error:', error);
     return res.status(500).json({ message: 'Unable to delete expense' });
   }
 };
 
 const getReceipt = async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid expense ID' });
     const business = await getBusiness(req.userId);
-    if (!business) return res.status(404).json({ message: 'Business workspace not found' });
-    const expense = await Expense.findOne({ _id: req.params.id, businessId: business._id, ownerId: req.userId }).lean();
+    const expense = business && mongoose.isValidObjectId(req.params.id)
+      ? await Expense.findOne({ _id: req.params.id, businessId: business._id, ownerId: req.userId }).lean()
+      : null;
     if (!expense?.receiptPublicId) return res.status(404).json({ message: 'Receipt not found' });
-
-    const temporaryUrl = createTemporaryReceiptUrl({
+    const url = createTemporaryReceiptUrl({
       publicId: expense.receiptPublicId,
       format: expense.receiptFormat,
       resourceType: expense.receiptResourceType,
       deliveryType: expense.receiptDeliveryType,
     });
     res.set('Cache-Control', 'private, no-store');
-    return res.redirect(302, temporaryUrl);
+    return res.redirect(302, url);
   } catch (error) {
-    console.error('Get receipt error:', error);
-    if (isCloudinaryError(error)) {
-      return res.status(503).json({ message: 'Receipt cloud storage is unavailable or not configured' });
-    }
     return res.status(500).json({ message: 'Unable to load receipt' });
   }
 };
 
 const deleteReceipt = async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid expense ID' });
     const business = await getBusiness(req.userId);
-    if (!business) return res.status(404).json({ message: 'Business workspace not found' });
-    const expense = await Expense.findOne({ _id: req.params.id, businessId: business._id, ownerId: req.userId });
-    if (!expense) return res.status(404).json({ message: 'Expense not found' });
-    if (!expense.receiptPublicId) return res.status(404).json({ message: 'Receipt not found' });
-    const oldReceipt = cloudReceipt(expense);
-    clearReceiptFields(expense);
+    const expense = business && mongoose.isValidObjectId(req.params.id)
+      ? await Expense.findOne({ _id: req.params.id, businessId: business._id, ownerId: req.userId })
+      : null;
+    if (!expense?.receiptPublicId) return res.status(404).json({ message: 'Receipt not found' });
+    const oldReceipt = receiptAsset(expense);
+    clearReceipt(expense);
     await expense.save();
-    await removeCloudReceipt(oldReceipt);
+    await removeReceiptAsset(oldReceipt);
     return res.json({ message: 'Receipt removed successfully', expense: serialize(expense) });
   } catch (error) {
-    console.error('Delete receipt error:', error);
     return res.status(500).json({ message: 'Unable to remove receipt' });
   }
 };
 
-module.exports = { listExpenses, getExpenseSummary, createExpense, updateExpense, deleteExpense, getReceipt, deleteReceipt };
+module.exports = {
+  listExpenses,
+  getExpenseSummary,
+  createExpense: saveExpense(false),
+  updateExpense: saveExpense(true),
+  markExpensePaid,
+  deleteExpense,
+  getReceipt,
+  deleteReceipt,
+};

@@ -7,17 +7,21 @@ const paymentSchema = new mongoose.Schema({
   customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', required: true, index: true },
   invoiceNumber: { type: String, required: true, trim: true, index: true },
   customerName: { type: String, required: true, trim: true },
-  amount: { type: Number, required: true, min: 0 },
+  amount: { type: Number, required: true, min: 0.01 },
   amountPaise: { type: Number, required: true, min: 1 },
   appliedAmount: { type: Number, default: 0, min: 0 },
   currency: { type: String, default: 'INR' },
   provider: { type: String, default: 'Razorpay' },
-  razorpayOrderId: { type: String, required: true, unique: true, index: true },
+  flow: { type: String, enum: ['PaymentLink', 'Checkout'], default: 'PaymentLink' },
+
+  razorpayPaymentLinkId: { type: String, default: '' },
+  paymentLinkUrl: { type: String, default: '' },
+  razorpayOrderId: { type: String, default: '' },
   razorpayPaymentId: { type: String, default: '', index: true },
   status: {
     type: String,
-    enum: ['Created', 'Authorized', 'Captured', 'Failed', 'Refunded'],
-    default: 'Created',
+    enum: ['LinkIssued', 'Created', 'Authorized', 'Captured', 'Failed', 'Expired', 'Cancelled', 'Refunded'],
+    default: 'LinkIssued',
     index: true,
   },
   method: { type: String, default: '' },
@@ -29,10 +33,15 @@ const paymentSchema = new mongoose.Schema({
   applyingToInvoice: { type: Boolean, default: false },
   paidAt: { type: Date, default: null },
   failedAt: { type: Date, default: null },
+  expireAt: { type: Date, default: null },
   webhookEventIds: { type: [String], default: [] },
 }, { timestamps: true });
 
 paymentSchema.index({ businessId: 1, createdAt: -1 });
 paymentSchema.index({ businessId: 1, invoiceId: 1, createdAt: -1 });
+paymentSchema.index(
+  { razorpayPaymentLinkId: 1 },
+  { unique: true, partialFilterExpression: { razorpayPaymentLinkId: { $type: 'string', $gt: '' } } },
+);
 
 module.exports = mongoose.model('Payment', paymentSchema);

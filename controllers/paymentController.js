@@ -6,27 +6,30 @@ const Customer = require('../models/Customer');
 const Invoice = require('../models/Invoice');
 const Payment = require('../models/Payment');
 const { getRazorpayClient, isRazorpayConfigured, razorpayMode } = require('../config/razorpay');
-const { recordActivity } = require('../services/activityService');
 
-const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
-const safeText = (value) => `${value ?? ''}`.trim();
+const clean = (value) => `${value ?? ''}`.trim();
+const money = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+const getBusiness = (ownerId) => Business.findOne({ ownerId }).select('_id ownerId businessName phone email');
 
-const getBusiness = (ownerId) => Business.findOne({ ownerId }).select(
-  '_id ownerId businessName phone email',
-);
-
-const timingSafeHexEqual = (left, right) => {
+const timingSafeEqual = (left, right) => {
   const a = Buffer.from(`${left || ''}`, 'utf8');
   const b = Buffer.from(`${right || ''}`, 'utf8');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 };
 
-const notify = async ({ payment, type, severity, title, message }) => {
+const customerContact = (value) => {
+  const digits = clean(value).replace(/\D/g, '');
+  if (digits.length === 10) return `+91${digits}`;
+  if (digits.length >= 11 && digits.length <= 15) return `+${digits}`;
+  return '';
+};
+
+const notify = async (payment, title, message, severity = 'success') => {
   try {
     await AppNotification.create({
       businessId: payment.businessId,
       ownerId: payment.ownerId,
-      type,
+      type: severity === 'success' ? 'payment_success' : 'payment_failed',
       severity,
       title,
       message,
@@ -50,97 +53,68 @@ const applyCapturedPayment = async (payment, providerPayment = {}) => {
     { new: true },
   );
   if (!locked) return Payment.findById(payment._id);
-  payment = locked;
 
   try {
+    const invoice = await Invoice.findOne({
+      _id: locked.invoiceId,
+      businessId: locked.businessId,
+      status: 'Active',
+    });
+    if (!invoice) throw new Error('The invoice linked to this payment is unavailable');
 
-  const invoice = await Invoice.findOne({
-    _id: payment.invoiceId,
-    businessId: payment.businessId,
-    status: 'Active',
-  });
-  if (!invoice) throw new Error('The invoice linked to this payment is unavailable');
+    const providerId = clean(providerPayment.id || locked.razorpayPaymentId);
+    if (providerId && invoice.onlinePaymentIds?.includes(providerId)) {
+      locked.appliedToInvoice = true;
+      locked.applyingToInvoice = false;
+      locked.status = 'Captured';
+      await locked.save();
+      return locked;
+    }
 
-  if (invoice.onlinePaymentIds?.includes(payment.razorpayPaymentId)) {
-    payment.appliedToInvoice = true;
-    payment.applyingToInvoice = false;
-    payment.appliedAmount = Math.min(payment.amount, invoice.total);
-    await payment.save();
-    return payment;
-  }
+    const received = providerPayment.amount ? money(Number(providerPayment.amount) / 100) : locked.amount;
+    const applied = money(Math.min(received, invoice.balanceDue));
+    if (applied > 0) {
+      invoice.paidAmount = money(invoice.paidAmount + applied);
+      invoice.balanceDue = money(Math.max(0, invoice.total - invoice.paidAmount));
+      invoice.paymentStatus = invoice.balanceDue <= 0 ? 'Paid' : 'Partial';
+      invoice.paymentMethod = 'Razorpay';
+      invoice.onlinePaymentIds = [...new Set([...(invoice.onlinePaymentIds || []), providerId].filter(Boolean))];
+      invoice.lastPaymentAt = new Date();
+      await invoice.save();
+      await Customer.updateOne(
+        { _id: invoice.customerId, businessId: locked.businessId },
+        { $inc: { outstandingBalance: -applied } },
+      );
+    }
 
-  const appliedAmount = roundMoney(Math.min(payment.amount, invoice.balanceDue));
-  if (appliedAmount <= 0) {
-    payment.status = 'Captured';
-    payment.appliedToInvoice = true;
-    payment.applyingToInvoice = false;
-    payment.appliedAmount = 0;
-    payment.paidAt = payment.paidAt || new Date();
-    await payment.save();
-    return payment;
-  }
+    locked.status = 'Captured';
+    locked.razorpayPaymentId = providerId;
+    locked.razorpayOrderId = clean(providerPayment.order_id || locked.razorpayOrderId);
+    locked.method = clean(providerPayment.method || locked.method);
+    locked.email = clean(providerPayment.email || locked.email);
+    locked.contact = clean(providerPayment.contact || locked.contact);
+    locked.appliedAmount = applied;
+    locked.appliedToInvoice = true;
+    locked.applyingToInvoice = false;
+    locked.paidAt = locked.paidAt || new Date();
+    await locked.save();
 
-  invoice.paidAmount = roundMoney(invoice.paidAmount + appliedAmount);
-  invoice.balanceDue = roundMoney(Math.max(0, invoice.total - invoice.paidAmount));
-  invoice.paymentStatus = invoice.balanceDue <= 0 ? 'Paid' : 'Partial';
-  invoice.paymentMethod = 'Razorpay';
-  invoice.onlinePaymentIds = [...new Set([
-    ...(invoice.onlinePaymentIds || []),
-    payment.razorpayPaymentId,
-  ])];
-  invoice.lastPaymentAt = new Date();
-  await invoice.save();
-
-  await Customer.updateOne(
-    { _id: invoice.customerId, businessId: payment.businessId },
-    { $inc: { outstandingBalance: -appliedAmount } },
-  );
-
-  payment.status = 'Captured';
-  payment.method = safeText(providerPayment.method || payment.method);
-  payment.email = safeText(providerPayment.email || payment.email);
-  payment.contact = safeText(providerPayment.contact || payment.contact);
-  payment.appliedToInvoice = true;
-  payment.applyingToInvoice = false;
-  payment.appliedAmount = appliedAmount;
-  payment.paidAt = payment.paidAt || new Date();
-  await payment.save();
-
-  await notify({
-    payment,
-    type: 'payment_success',
-    severity: 'success',
-    title: `Online payment received • ${invoice.invoiceNumber}`,
-    message: `${payment.customerName} paid ₹${appliedAmount.toFixed(2)} using Razorpay.`,
-  });
-  await recordActivity({
-    businessId: payment.businessId,
-    ownerId: payment.ownerId,
-    type: 'payment_received',
-    category: 'Sales',
-    title: `Online payment received for ${invoice.invoiceNumber}`,
-    description: `${payment.customerName} • Razorpay${payment.method ? ` • ${payment.method}` : ''}`,
-    amount: appliedAmount,
-    entityType: 'Invoice',
-    entityId: invoice._id,
-    route: '/payments',
-    metadata: { paymentId: payment.razorpayPaymentId, orderId: payment.razorpayOrderId },
-  });
-
-  return payment;
-  } catch (error) {
-    await Payment.updateOne(
-      { _id: payment._id, appliedToInvoice: false },
-      { $set: { applyingToInvoice: false } },
+    await notify(
+      locked,
+      `Payment received • ${locked.invoiceNumber}`,
+      `${locked.customerName} paid ₹${applied.toFixed(2)} through the shared Razorpay link.`,
     );
+    return locked;
+  } catch (error) {
+    await Payment.updateOne({ _id: locked._id }, { $set: { applyingToInvoice: false } });
     throw error;
   }
 };
 
-const createOrder = async (req, res) => {
+const createPaymentLink = async (req, res) => {
   try {
     if (!isRazorpayConfigured()) {
-      return res.status(503).json({ message: 'Razorpay is not configured. Add the Test Mode keys to the backend .env file.' });
+      return res.status(503).json({ message: 'Razorpay is not configured on the backend' });
     }
     if (!mongoose.isValidObjectId(req.params.invoiceId)) {
       return res.status(400).json({ message: 'Invalid invoice ID' });
@@ -155,17 +129,67 @@ const createOrder = async (req, res) => {
     if (!invoice) return res.status(404).json({ message: 'Active invoice not found' });
     if (invoice.balanceDue <= 0) return res.status(409).json({ message: 'This invoice is already fully paid' });
 
-    const requestedAmount = req.body.amount === undefined ? invoice.balanceDue : Number(req.body.amount);
-    const amount = roundMoney(requestedAmount);
+    const amount = money(req.body.amount === undefined ? invoice.balanceDue : req.body.amount);
     if (!Number.isFinite(amount) || amount < 1 || amount > invoice.balanceDue) {
-      return res.status(400).json({ message: 'Online payment must be at least ₹1 and cannot exceed the balance due' });
+      return res.status(400).json({ message: 'Link amount must be at least ₹1 and cannot exceed the balance due' });
     }
     const amountPaise = Math.round(amount * 100);
-    const receipt = `wp_${String(invoice._id).slice(-12)}_${Date.now()}`.slice(0, 40);
-    const order = await getRazorpayClient().orders.create({
+
+    // Reuse the same still-valid link to prevent accidental duplicate links.
+    const existing = await Payment.findOne({
+      businessId: business._id,
+      invoiceId: invoice._id,
+      amountPaise,
+      status: 'LinkIssued',
+      paymentLinkUrl: { $ne: '' },
+      $or: [{ expireAt: null }, { expireAt: { $gt: new Date() } }],
+    }).sort({ createdAt: -1 });
+    if (existing) {
+      return res.json({
+        message: 'Existing payment link is ready to share',
+        payment: existing,
+        link: existing.paymentLinkUrl,
+        mode: razorpayMode(),
+      });
+    }
+
+    const olderLinks = await Payment.find({
+      businessId: business._id,
+      invoiceId: invoice._id,
+      status: 'LinkIssued',
+      razorpayPaymentLinkId: { $ne: '' },
+    });
+    for (const older of olderLinks) {
+      try {
+        await getRazorpayClient().paymentLink.cancel(older.razorpayPaymentLinkId);
+        older.status = 'Cancelled';
+        await older.save();
+      } catch (cancelError) {
+        console.error('Cancel older payment link error:', cancelError);
+        return res.status(409).json({
+          message: 'An older payment link is still active. Check its status in Razorpay before generating a new link.',
+        });
+      }
+    }
+
+    const expireAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const referenceId = `wp_${String(invoice._id).slice(-12)}_${Date.now()}`.slice(0, 40);
+    const customer = {
+      name: clean(invoice.customerSnapshot?.name) || 'Customer',
+      ...(clean(invoice.customerSnapshot?.email) ? { email: clean(invoice.customerSnapshot.email) } : {}),
+      ...(customerContact(invoice.customerSnapshot?.phone) ? { contact: customerContact(invoice.customerSnapshot.phone) } : {}),
+    };
+
+    const link = await getRazorpayClient().paymentLink.create({
       amount: amountPaise,
       currency: 'INR',
-      receipt,
+      accept_partial: false,
+      description: `Payment for ${invoice.invoiceNumber} to ${business.businessName}`.slice(0, 255),
+      reference_id: referenceId,
+      customer,
+      notify: { sms: false, email: false },
+      reminder_enable: false,
+      expire_by: Math.floor(expireAt.getTime() / 1000),
       notes: {
         workpilot_invoice_id: String(invoice._id),
         invoice_number: invoice.invoiceNumber,
@@ -179,120 +203,27 @@ const createOrder = async (req, res) => {
       invoiceId: invoice._id,
       customerId: invoice.customerId,
       invoiceNumber: invoice.invoiceNumber,
-      customerName: invoice.customerSnapshot?.name || 'Customer',
+      customerName: customer.name,
       amount,
       amountPaise,
-      razorpayOrderId: order.id,
-      status: 'Created',
+      razorpayPaymentLinkId: link.id,
+      // Keeps compatibility with the unique razorpayOrderId index created by
+      // the earlier checkout implementation. The webhook replaces it with the
+      // real Razorpay order ID after the customer pays.
+      razorpayOrderId: link.id,
+      paymentLinkUrl: link.short_url,
+      status: 'LinkIssued',
+      expireAt,
     });
-
     return res.status(201).json({
-      message: 'Secure payment order created',
-      paymentId: payment._id,
-      checkout: {
-        key: process.env.RAZORPAY_KEY_ID,
-        orderId: order.id,
-        amount: amountPaise,
-        currency: 'INR',
-        businessName: business.businessName,
-        description: `Payment for ${invoice.invoiceNumber}`,
-        customerName: invoice.customerSnapshot?.name || '',
-        customerEmail: invoice.customerSnapshot?.email || '',
-        customerPhone: invoice.customerSnapshot?.phone || '',
-        mode: razorpayMode(),
-      },
+      message: 'Payment link generated successfully',
+      payment,
+      link: payment.paymentLinkUrl,
+      mode: razorpayMode(),
     });
   } catch (error) {
-    console.error('Create Razorpay order error:', error);
-    return res.status(500).json({ message: error.error?.description || error.message || 'Unable to start online payment' });
-  }
-};
-
-const verifyPayment = async (req, res) => {
-  try {
-    const orderId = safeText(req.body.razorpayOrderId);
-    const providerPaymentId = safeText(req.body.razorpayPaymentId);
-    const signature = safeText(req.body.razorpaySignature);
-    if (!orderId || !providerPaymentId || !signature) {
-      return res.status(400).json({ message: 'Incomplete Razorpay payment response' });
-    }
-    const business = await getBusiness(req.userId);
-    if (!business) return res.status(404).json({ message: 'Business workspace not found' });
-    const payment = await Payment.findOne({ razorpayOrderId: orderId, businessId: business._id });
-    if (!payment) return res.status(404).json({ message: 'Payment order not found' });
-
-    const expected = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-      .update(`${orderId}|${providerPaymentId}`)
-      .digest('hex');
-    if (!timingSafeHexEqual(expected, signature)) {
-      return res.status(400).json({ message: 'Payment signature verification failed' });
-    }
-
-    let remote = await getRazorpayClient().payments.fetch(providerPaymentId);
-    if (remote.order_id !== orderId || Number(remote.amount) !== payment.amountPaise) {
-      return res.status(400).json({ message: 'Razorpay payment details do not match this order' });
-    }
-    payment.razorpayPaymentId = providerPaymentId;
-    payment.method = safeText(remote.method);
-    payment.email = safeText(remote.email);
-    payment.contact = safeText(remote.contact);
-
-    if (remote.status === 'authorized') {
-      payment.status = 'Authorized';
-      await payment.save();
-      try {
-        remote = await getRazorpayClient().payments.capture(providerPaymentId, payment.amountPaise, 'INR');
-      } catch (captureError) {
-        console.error('Razorpay capture pending:', captureError);
-      }
-    }
-
-    if (remote.status !== 'captured') {
-      await payment.save();
-      return res.status(202).json({
-        message: 'Payment is authorized and awaiting capture. WorkPilot will update it through the webhook.',
-        payment,
-      });
-    }
-
-    await payment.save();
-    const capturedPayment = await applyCapturedPayment(payment, remote);
-    const invoice = await Invoice.findById(payment.invoiceId).lean();
-    return res.json({ message: 'Online payment verified successfully', payment: capturedPayment, invoice });
-  } catch (error) {
-    console.error('Verify Razorpay payment error:', error);
-    return res.status(500).json({ message: error.message || 'Unable to verify online payment' });
-  }
-};
-
-const recordFailure = async (req, res) => {
-  try {
-    const business = await getBusiness(req.userId);
-    if (!business) return res.status(404).json({ message: 'Business workspace not found' });
-    const payment = await Payment.findOne({
-      razorpayOrderId: safeText(req.body.razorpayOrderId),
-      businessId: business._id,
-    });
-    if (!payment) return res.status(404).json({ message: 'Payment order not found' });
-    if (!['Captured', 'Failed', 'Refunded'].includes(payment.status)) {
-      payment.status = 'Failed';
-      payment.errorCode = safeText(req.body.code);
-      payment.errorDescription = safeText(req.body.message).slice(0, 500);
-      payment.failedAt = new Date();
-      await payment.save();
-      await notify({
-        payment,
-        type: 'payment_failed',
-        severity: 'warning',
-        title: `Online payment failed • ${payment.invoiceNumber}`,
-        message: payment.errorDescription || 'The Razorpay checkout was not completed.',
-      });
-    }
-    return res.json({ message: 'Payment attempt updated' });
-  } catch (error) {
-    console.error('Record payment failure error:', error);
-    return res.status(500).json({ message: 'Unable to update payment attempt' });
+    console.error('Create payment link error:', error);
+    return res.status(500).json({ message: error.error?.description || error.message || 'Unable to generate payment link' });
   }
 };
 
@@ -301,13 +232,11 @@ const listPayments = async (req, res) => {
     const business = await getBusiness(req.userId);
     if (!business) return res.status(404).json({ message: 'Business workspace not found' });
     const filter = { businessId: business._id };
-    if (['Created', 'Authorized', 'Captured', 'Failed', 'Refunded'].includes(req.query.status)) {
-      filter.status = req.query.status;
-    }
-    const search = safeText(req.query.search);
+    const accepted = ['LinkIssued', 'Created', 'Authorized', 'Captured', 'Failed', 'Expired', 'Cancelled', 'Refunded'];
+    if (accepted.includes(req.query.status)) filter.status = req.query.status;
+    const search = clean(req.query.search);
     if (search) {
-      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const regex = new RegExp(escaped, 'i');
+      const regex = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
       filter.$or = [{ invoiceNumber: regex }, { customerName: regex }, { razorpayPaymentId: regex }];
     }
     const [payments, rows] = await Promise.all([
@@ -317,30 +246,29 @@ const listPayments = async (req, res) => {
         { $group: { _id: '$status', count: { $sum: 1 }, amount: { $sum: '$amount' } } },
       ]),
     ]);
-    const byStatus = Object.fromEntries(rows.map((row) => [row._id, { count: row.count, amount: roundMoney(row.amount) }]));
+    const summary = Object.fromEntries(rows.map((row) => [row._id, row]));
     return res.json({
       payments,
       summary: {
-        capturedAmount: byStatus.Captured?.amount || 0,
-        capturedCount: byStatus.Captured?.count || 0,
-        pendingCount: (byStatus.Created?.count || 0) + (byStatus.Authorized?.count || 0),
-        failedCount: byStatus.Failed?.count || 0,
+        capturedAmount: money(summary.Captured?.amount),
+        capturedCount: summary.Captured?.count || 0,
+        pendingCount: (summary.LinkIssued?.count || 0) + (summary.Created?.count || 0) + (summary.Authorized?.count || 0),
+        failedCount: (summary.Failed?.count || 0) + (summary.Expired?.count || 0),
       },
       mode: razorpayMode(),
       configured: isRazorpayConfigured(),
     });
   } catch (error) {
-    console.error('List payments error:', error);
     return res.status(500).json({ message: 'Unable to load payment history' });
   }
 };
 
 const getPayment = async (req, res) => {
   try {
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ message: 'Invalid payment ID' });
     const business = await getBusiness(req.userId);
-    if (!business) return res.status(404).json({ message: 'Business workspace not found' });
-    const payment = await Payment.findOne({ _id: req.params.id, businessId: business._id }).lean();
+    const payment = business && mongoose.isValidObjectId(req.params.id)
+      ? await Payment.findOne({ _id: req.params.id, businessId: business._id }).lean()
+      : null;
     if (!payment) return res.status(404).json({ message: 'Payment not found' });
     return res.json({ payment });
   } catch (error) {
@@ -351,49 +279,55 @@ const getPayment = async (req, res) => {
 const handleWebhook = async (req, res) => {
   try {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-    if (!secret) return res.status(503).json({ message: 'Webhook secret is not configured' });
     const signature = req.headers['x-razorpay-signature'];
-    const rawBody = req.rawBody;
-    if (!rawBody || !signature) return res.status(400).json({ message: 'Invalid webhook request' });
-    const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-    if (!timingSafeHexEqual(expected, signature)) {
-      return res.status(400).json({ message: 'Invalid webhook signature' });
-    }
+    if (!secret) return res.status(503).json({ message: 'Webhook secret is not configured' });
+    if (!req.rawBody || !signature) return res.status(400).json({ message: 'Invalid webhook request' });
+    const expected = crypto.createHmac('sha256', secret).update(req.rawBody).digest('hex');
+    if (!timingSafeEqual(expected, signature)) return res.status(400).json({ message: 'Invalid webhook signature' });
 
-    const eventId = safeText(req.headers['x-razorpay-event-id']);
-    const event = safeText(req.body?.event);
-    const entity = req.body?.payload?.payment?.entity || {};
-    const orderId = safeText(entity.order_id);
-    if (!orderId) return res.json({ received: true });
-    const payment = await Payment.findOne({ razorpayOrderId: orderId });
+    const eventId = clean(req.headers['x-razorpay-event-id']);
+    const event = clean(req.body?.event);
+    const paymentEntity = req.body?.payload?.payment?.entity || {};
+    const linkEntity = req.body?.payload?.payment_link?.entity || {};
+    const linkId = clean(linkEntity.id || paymentEntity.payment_link_id);
+    const orderId = clean(paymentEntity.order_id);
+    const notesInvoiceId = clean(paymentEntity.notes?.workpilot_invoice_id || linkEntity.notes?.workpilot_invoice_id);
+
+    let payment = null;
+    if (linkId) payment = await Payment.findOne({ razorpayPaymentLinkId: linkId });
+    if (!payment && orderId) payment = await Payment.findOne({ razorpayOrderId: orderId });
+    if (!payment && mongoose.isValidObjectId(notesInvoiceId)) {
+      payment = await Payment.findOne({ invoiceId: notesInvoiceId, status: 'LinkIssued' }).sort({ createdAt: -1 });
+    }
     if (!payment) return res.json({ received: true });
     if (eventId && payment.webhookEventIds.includes(eventId)) return res.json({ received: true, duplicate: true });
 
     if (eventId) payment.webhookEventIds.push(eventId);
-    payment.razorpayPaymentId = safeText(entity.id || payment.razorpayPaymentId);
-    payment.method = safeText(entity.method || payment.method);
-    payment.email = safeText(entity.email || payment.email);
-    payment.contact = safeText(entity.contact || payment.contact);
+    payment.razorpayOrderId = orderId || payment.razorpayOrderId;
+    payment.razorpayPaymentId = clean(paymentEntity.id || payment.razorpayPaymentId);
+    payment.method = clean(paymentEntity.method || payment.method);
+    payment.email = clean(paymentEntity.email || payment.email);
+    payment.contact = clean(paymentEntity.contact || payment.contact);
 
-    if (event === 'payment.captured') {
+    if (event === 'payment_link.paid' || event === 'payment.captured') {
       await payment.save();
-      await applyCapturedPayment(payment, entity);
+      await applyCapturedPayment(payment, paymentEntity);
     } else if (event === 'payment.authorized' && payment.status !== 'Captured') {
       payment.status = 'Authorized';
       await payment.save();
     } else if (event === 'payment.failed' && payment.status !== 'Captured') {
       payment.status = 'Failed';
-      payment.errorCode = safeText(entity.error_code);
-      payment.errorDescription = safeText(entity.error_description).slice(0, 500);
+      payment.errorCode = clean(paymentEntity.error_code);
+      payment.errorDescription = clean(paymentEntity.error_description).slice(0, 500);
       payment.failedAt = new Date();
       await payment.save();
-      await notify({
-        payment,
-        type: 'payment_failed',
-        severity: 'warning',
-        title: `Online payment failed • ${payment.invoiceNumber}`,
-        message: payment.errorDescription || 'The Razorpay payment failed.',
-      });
+      await notify(payment, `Payment failed • ${payment.invoiceNumber}`, payment.errorDescription || 'The customer payment failed.', 'warning');
+    } else if (event === 'payment_link.expired' && payment.status !== 'Captured') {
+      payment.status = 'Expired';
+      await payment.save();
+    } else if (event === 'payment_link.cancelled' && payment.status !== 'Captured') {
+      payment.status = 'Cancelled';
+      await payment.save();
     } else {
       await payment.save();
     }
@@ -404,11 +338,4 @@ const handleWebhook = async (req, res) => {
   }
 };
 
-module.exports = {
-  createOrder,
-  verifyPayment,
-  recordFailure,
-  listPayments,
-  getPayment,
-  handleWebhook,
-};
+module.exports = { createPaymentLink, listPayments, getPayment, handleWebhook };
