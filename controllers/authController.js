@@ -403,28 +403,27 @@ const register = async (req, res) => {
       throw error;
     }
 
-    let welcomeEmailSent = true;
+    const token = createToken(user._id);
 
-    try {
-      await sendWelcomeEmail({
+    // Return success immediately to Flutter
+    res.status(201).json({
+      message: 'Account created successfully.',
+      token,
+      user: publicUser(user),
+      business: publicBusiness(business),
+    });
+
+    // Send welcome email separately
+    setImmediate(() => {
+      sendWelcomeEmail({
         to: user.email,
         ownerName: user.name,
         businessName: business.businessName,
+      }).catch((emailError) => {
+        console.error('Welcome email error:', emailError.message);
       });
-    } catch (emailError) {
-      welcomeEmailSent = false;
-      console.error('Welcome email error:', emailError.message);
-    }
-
-    return res.status(201).json({
-      message: welcomeEmailSent
-        ? 'Account created successfully. Welcome email sent.'
-        : 'Account created successfully.',
-      token: createToken(user._id),
-      user: publicUser(user),
-      business: publicBusiness(business),
-      welcomeEmailSent,
     });
+    return;
   } catch (error) {
     console.error('Register error:', error);
 
