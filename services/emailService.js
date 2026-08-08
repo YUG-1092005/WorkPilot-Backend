@@ -53,45 +53,28 @@ const createTransporter = () => {
 };
 
 const sendMail = async ({ to, subject, html, text }) => {
-  if (!process.env.BREVO_API_KEY) {
-    throw new Error('BREVO_API_KEY is not configured');
-  }
-
-  if (!process.env.BREVO_SENDER_EMAIL) {
-    throw new Error('BREVO_SENDER_EMAIL is not configured');
-  }
-
-  const response = await fetch(
-    'https://api.brevo.com/v3/smtp/email',
-    {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        'content-type': 'application/json',
-        'api-key': process.env.BREVO_API_KEY,
-      },
-      body: JSON.stringify({
-        sender: {
-          name: 'WorkPilot',
-          email: process.env.BREVO_SENDER_EMAIL,
-        },
-        to: [{ email: to }],
-        subject,
-        htmlContent: html,
-        textContent: text,
-      }),
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
     },
-  );
+    body: JSON.stringify({
+      from: 'WorkPilot <onboarding@resend.dev>',
+      to: [to],
+      subject,
+      html,
+      text,
+    }),
+  });
 
   const result = await response.json();
 
   if (!response.ok) {
-    throw new Error(
-      result.message || `Brevo email failed: ${response.status}`,
-    );
+    throw new Error(result.message || 'Unable to send email');
   }
 
-  console.log('Email sent successfully:', result.messageId);
+  console.log('Email sent successfully:', result.id);
   return result;
 };
 
