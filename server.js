@@ -8,6 +8,7 @@ const authRoutes = require('./routes/authRoutes');
 const inventoryRoutes = require('./routes/inventoryRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const customerRoutes = require('./routes/customerRoutes');
+const dependencyRoutes = require('./routes/dependencyRoutes');
 const salesRoutes = require('./routes/salesRoutes');
 const expenseRoutes = require('./routes/expenseRoutes');
 const taskRoutes = require('./routes/taskRoutes');
@@ -15,6 +16,9 @@ const reportRoutes = require('./routes/reportRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const activityRoutes = require('./routes/activityRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
+const noteRoutes = require('./routes/noteRoutes');
+const aiRoutes = require('./routes/aiRoutes');
+
 const { handleWebhook } = require('./controllers/paymentController');
 const { startNotificationSweeps } = require('./services/notificationSweepService');
 
@@ -48,6 +52,9 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/activities', activityRoutes);
 app.post('/api/payments/webhook', handleWebhook);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/notes', noteRoutes);
+app.use('/api/ai', aiRoutes);
+app.use('/api/dependencies', dependencyRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ message: 'API endpoint not found' });
