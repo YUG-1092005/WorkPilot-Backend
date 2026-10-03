@@ -18,9 +18,12 @@ const activityRoutes = require('./routes/activityRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const noteRoutes = require('./routes/noteRoutes');
 const aiRoutes = require('./routes/aiRoutes');
-
 const { handleWebhook } = require('./controllers/paymentController');
 const { startNotificationSweeps } = require('./services/notificationSweepService');
+const businessCardRoutes = require('./routes/businessCardRoutes');
+const { renderPublicCard } = require('./controllers/businessCardController');
+const guardrailRoutes = require('./routes/guardrailRoutes');
+const smsRoutes = require('./routes/smsRoutes');
 
 const app = express();
 
@@ -55,6 +58,11 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/notes', noteRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/dependencies', dependencyRoutes);
+app.use('/api/business-card', businessCardRoutes);
+app.use('/api/guardrails', guardrailRoutes);
+app.use('/api/sms', smsRoutes);
+
+app.get('/card/:slug', renderPublicCard);
 
 app.use((req, res) => {
   res.status(404).json({ message: 'API endpoint not found' });

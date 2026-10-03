@@ -1767,6 +1767,7 @@ const geminiTools = [
         },
       },
 
+
       {
         name: 'call_customer',
         description:
@@ -1858,21 +1859,26 @@ const geminiTools = [
        * -------------------------
        */
        {
-         name: 'send_invoice_whatsapp',
+         name: 'send_payment_sms',
          description:
-             'Prepare an existing WorkPilot invoice for sharing through WhatsApp. Use this when the business owner explicitly asks to send an invoice on WhatsApp. The invoice will be opened in the app share sheet so the user can select WhatsApp and send it.',
+           'Send a real payment reminder SMS to a customer for a pending or partially paid WorkPilot invoice. Use this only when the business owner explicitly asks to send an SMS. If the user gives a customer name, first identify that customer and their pending invoice. Never claim the SMS was sent unless the tool succeeds.',
          parameters: {
            type: 'OBJECT',
            properties: {
              invoiceNumber: {
                type: 'STRING',
                description:
-                 'Optional invoice number such as INV-2026-00004.',
+                 'Optional pending invoice number, for example INV-2026-00004.',
              },
              customerName: {
                type: 'STRING',
                description:
-                 'Optional customer name such as Raju.',
+                 'Customer name whose pending or partially paid invoice should receive the SMS.',
+             },
+             message: {
+               type: 'STRING',
+               description:
+                 'Optional custom SMS message. Leave empty to use the standard WorkPilot payment reminder.',
              },
            },
          },

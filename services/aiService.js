@@ -1,5 +1,7 @@
 const { GoogleGenAI } = require('@google/genai');
-
+const {
+  sendPaymentReminder,
+} = require('../controllers/smsController');
 const {
   geminiTools,
   getInventory,
@@ -127,12 +129,19 @@ const executeTool = async (name, args, userId) => {
         amount: args?.amount,
       });
 
-     case 'send_invoice_whatsapp':
-            return await sendInvoiceToWhatsApp({
-              userId,
-              invoiceNumber: args?.invoiceNumber,
-              customerName: args?.customerName,
-            });
+    case 'send_payment_sms':
+      return await sendPaymentReminder({
+        userId,
+        invoiceNumber: args?.invoiceNumber,
+        customerName: args?.customerName,
+        customMessage: args?.message,
+      });
+
+    case 'call_customer':
+      return await callCustomer({
+        userId,
+        customerName: args?.customerName,
+      });
 
     case 'call_customer':
       return await callCustomer({
